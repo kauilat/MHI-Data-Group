@@ -114,7 +114,7 @@ server <- function(input, output, session) {
     )
     
     # Data preprocessing
-    smm_data <- df %>%
+    proc_data <- df %>%
       mutate(
         period_start_date = mdy(period_start_date),
         year = year(period_start_date),
@@ -125,5 +125,69 @@ server <- function(input, output, session) {
       ) %>%
       left_join(hospital_mapping, by = "masked_name")
     
-    smm_data
+    proc_data
+  })
+  
+  # Reactive UI for dynamic controls based on the uploaded data
+  output$dynamic_controls <- renderUI({
+    df <- process_data_reactive()
+    req(df)
+    
+    tagList(
+      sliderInput("year", "Select a year:",
+                  df$year),
+      
+      radioButtons("granularity", "Display data by time granularity:",
+                   choices = c("Quarter" = "quarter_label", "Year" = "year"),
+                   selected = "quarter_label"),
+      
+      selectInput("group_by", "Group by (optional):",
+                  choices = c("All" = "all", "Hospital" = "Name", "Race" = "race", "Measure" = "measure"),
+                  selected = "all"),
+      
+      checkboxInput("show_ci", "Show Confidence Intervals", value = FALSE)
+    )
+  })
+  
+  # Reactive expression for the main filtered data
+  filtered_smm_data <- reactive({
+    req(input$year_range, input$granularity, input$group_by)
+    
+    data <- smm_data_reactive()
+    
+    data_filtered <- data %>%
+      filter(year >= input$year_range[1] & year <= input$year_range[2]) %>%
+      filter(!measure %in% c("SMM Hemorrhage", "SMM Preeclampsia"))
+    
+    grouping_vars <- if(input$group_by != "all") c(input$granularity, input$group_by) else input$granularity
+    
+    smm_summary <- data_filtered %>%
+      group_by(across(all_of(grouping_vars))) %>%
+      summarise(
+        total_numerator = sum(numerator, na.rm = TRUE),
+        total_denominator = sum(denominator, na.rm = TRUE),
+        .groups = 'drop'
+      )
+    
+    # Calculate confidence intervals
+    smm_summary %>%
+      mutate(
+        rate = (total_numerator / total_denominator) * 10000,
+        rate_lower_ci = (rate - qnorm(0.975) * 10000 * sqrt(rate/10000 * (1 - rate/10000) / total_denominator)),
+        rate_upper_ci = (rate + qnorm(0.975) * 10000 * sqrt(rate/10000 * (1 - rate/10000) / total_denominator)),
+        rate_lower_ci = pmax(0, rate_lower_ci), # ensure lower bound is not negative
+        rate = round(rate),
+        rate_lower_ci = round(rate_lower_ci),
+        rate_upper_ci = round(rate_upper_ci)
+      )
+  })
+  
+  # Reactive value to store the clicked point
+  clicked_point <- reactiveVal(NULL)
+  
+  # Observe clicks on the main plot
+  observeEvent(event_data("plotly_click"), {
+    click_data <- event_data("plotly_click")
+    # Take only the first x-value to avoid repetition
+    clicked_point(click_data$x[1])
   })
