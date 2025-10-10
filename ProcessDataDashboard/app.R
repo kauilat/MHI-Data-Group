@@ -1,63 +1,20 @@
-# Load necessary packages
+# Load necessary libraries
 library(shiny)
-library(shinydashboard)
 library(ggplot2)
 library(dplyr)
-library(lubridate)
 library(tidyr)
-library(readxl)
-library(plotly)
-library(DT)
-library(scales)
 library(stringr)
+library(plotly)
+library(readxl) 
+library(lubridate) 
+library(data.table)
+library(tibble) 
+library(RColorBrewer) # Ensure RColorBrewer is explicitly loaded
 
-# Define the UI
-ui <- dashboardPage(
-  dashboardHeader(title = "Process Measures",
-                  titleWidth = 300),
-  dashboardSidebar(
-    width = 300,
-    h4("Upload Your Data"),
-    fileInput("file1", "Choose CSV or Excel File",
-              multiple = FALSE,
-              accept = c(".csv", ".xlsx")),
-    
-    uiOutput("dynamic_controls")
-  ),
-  dashboardBody(
-    fluidRow(
-      column(12,
-             # The following tab is commented out for simplicity.
-             # tabPanel("Overall SMM Point Prevalence",
-             #          h3("SMM Cases per 10,000 Deliveries"),
-             #          plotlyOutput("smm_rate_plot", height = "600px")
-             # )
-      ),
-      box(
-        width = 12,
-        title = "SMM Cases per 10,000 Deliveries",
-        status = "primary",
-        solidHeader = TRUE,
-        plotlyOutput("smm_rate_plot", height = "600px")
-      ),
-      box(
-        width = 12,
-        title = textOutput("bar_chart_title"),
-        status = "info",
-        solidHeader = TRUE,
-        plotlyOutput("smm_breakdown_plot", height = "600px")
-      )
-    )
-  )
-)
+# --- DATA PROCESSING AND HELPER FUNCTIONS ---
 
-# Helper function to clean up measure names
+# Function to properly format measure names (now renamed to match user's snippet)
 clean_measure_names <- function(measure_name) {
-  # Replace specific acronyms and words
-  measure_name <- str_replace_all(measure_name, "pnc", "PNC")
-  measure_name <- str_replace_all(measure_name, "oen", " OEN")
-  measure_name <- str_replace_all(measure_name, "sud", " SUD")
-  
   # Replace underscores with spaces
   measure_name <- str_replace_all(measure_name, "_", " ")
   
@@ -72,16 +29,63 @@ clean_measure_names <- function(measure_name) {
   return(measure_name)
 }
 
-# Helper function to clean up race names
+# Function to clean race names (defined based on standard cleaning practices)
 clean_race_names <- function(race_name) {
-  # Replace underscores with spaces
+  race_name <- tolower(race_name)
   race_name <- str_replace_all(race_name, "_", " ")
-  # Capitalize the first letter of each word
   race_name <- str_to_title(race_name)
+  # Example cleaning:
+  race_name[grepl("other", race_name)] <- "Other / Unknown"
   return(race_name)
 }
 
-# Define the server logic
+# --- UI DEFINITION ---
+ui <- fluidPage(
+  titlePanel("Process Measures Dashboard - Data Upload"),
+  
+  # Main layout with tabs for measure types
+  tabsetPanel(
+    id = "measure_type_tabs",
+    
+    # Numerator/Denominator Tab - Current Focus
+    tabPanel("Numerator/Denominator",
+             value = "nd_tab",
+             sidebarLayout(
+               sidebarPanel(
+                 width = 3,
+                 h4("Data & Filter Controls"),
+                 
+                 # 1. File Input Control for Uploading Data (Renamed to input$file_upload)
+                 fileInput("file_upload", "Upload Data (CSV or Excel)",
+                           multiple = FALSE,
+                           accept = c(".csv", ".xls", ".xlsx")),
+                 
+                 hr(),
+                 
+                 # 2. Year Filter (will be dynamically updated)
+                 uiOutput("year_select_ui"),
+                 
+                 # 3. Measure Selector (will be dynamically updated)
+                 uiOutput("measure_select_nd_ui")
+               ),
+               
+               mainPanel(
+                 width = 9,
+                 # Conditional rendering of content based on file upload status
+                 uiOutput("main_content") 
+               )
+             )
+    ),
+    
+    # Placeholder Tabs for future development
+    tabPanel("Raw Value", value = "raw_tab",
+             p("This panel will display data for Raw Value measures (where Denominator = 1).")),
+    tabPanel("Range", value = "range_tab",
+             p("This panel will display data for Range measures (likely Compliance/Score percentages)."))
+  )
+)
+
+# --- SERVER LOGIC ---
 server <- function(input, output, session) {
   
   # Hospital Name Mapping (hardcoded as this is a lookup table)
@@ -100,94 +104,327 @@ server <- function(input, output, session) {
     "Wilcox Medical Center", "Zeta Omicron Kappa"
   )
   
-  # Reactive expression to read and preprocess the uploaded file
-  process_data_reactive <- reactive({
-    req(input$file1)
+  # Reactive expression to read and preprocess the uploaded file (using input$file_upload)
+  raw_data <- reactive({
+    # Use req(input$file_upload) which is the actual file input ID
+    req(input$file_upload) 
     
-    ext <- tools::file_ext(input$file1$name)
+    ext <- tools::file_ext(input$file_upload$name)
+    file_path <- input$file_upload$datapath
     
     # Read the data based on file type
-    df <- switch(ext,
-                 csv = read.csv(input$file1$datapath, header = TRUE, na.strings = c("", "NA")),
-                 xlsx = read_excel(input$file1$datapath),
-                 stop("Unsupported file type")
-    )
+    df <- tryCatch({
+      if (ext == "csv") {
+        # Using data.table::fread is more robust than read.csv for different CSV formats
+        data.table::fread(file_path, data.table = FALSE, na.strings = c("", "NA")) 
+      } else if (ext %in% c("xls", "xlsx")) {
+        read_excel(file_path, sheet = 1)
+      } else {
+        validate("Unsupported file type. Please upload a CSV or Excel file.")
+      }
+    }, error = function(e) {
+      validate(paste("Error reading file:", e$message))
+    })
     
-    # Data preprocessing
-    proc_data <- df %>%
+    # 1. Ensure column names are in lower case for consistent referencing
+    names(df) <- tolower(names(df))
+    df <- as.data.frame(df)
+    
+    # 2. Critical check for required columns
+    required_cols <- c("hospital_unique_identifier", "masked_name", "collaborative", "measure", 
+                       "race", "period_start_date", "period_end_date", "numerator", 
+                       "denominator", "measure_display_type")
+    missing_cols <- setdiff(required_cols, names(df))
+    if (length(missing_cols) > 0) {
+      validate(paste("Data is missing required columns:", paste(missing_cols, collapse = ", ")))
+    }
+    
+    # 3. Data preprocessing (Based on user's provided code block)
+    smm_data <- df %>%
       mutate(
+        # FIX: Clean the key filter column (Crucial fix from previous iteration)
+        measure_display_type = tolower(trimws(as.character(measure_display_type))),
+        
+        # Date and Time Derivation using mdy()
         period_start_date = mdy(period_start_date),
-        year = year(period_start_date),
-        quarter = quarter(period_start_date),
-        quarter_label = paste0(year, " Q", quarter),
-        measure = clean_measure_names(measure), # Apply the measure cleaning function
-        race = clean_race_names(race) # Apply the new race cleaning function
+        year = as.factor(year(period_start_date)),
+        quarter = as.factor(quarter(period_start_date)),
+        quarter_label = factor(
+          paste0(year, " Q", quarter),
+          levels = unique(paste0(year, " Q", quarter))[order(unique(paste0(year, " Q", quarter)))]
+        ),
+        
+        # Apply cleaning functions
+        measure = clean_measure_names(measure), 
+        race = clean_race_names(race),
+        
+        # Ensure numerators and denominators are numeric
+        numerator = as.numeric(numerator),
+        denominator = as.numeric(denominator)
       ) %>%
+      # Join with the mapping table to get the real 'Name'
       left_join(hospital_mapping, by = "masked_name")
     
-    proc_data
+    smm_data
   })
   
-  # Reactive UI for dynamic controls based on the uploaded data
-  output$dynamic_controls <- renderUI({
-    df <- process_data_reactive()
-    req(df)
+  # Reactive list of unique formatted measures for UI dropdowns
+  measure_choices <- reactive({
+    df <- raw_data()
+    req(df, "measure")
     
-    tagList(
-      sliderInput("year", "Select a year:",
-                  df$year),
-      
-      radioButtons("granularity", "Display data by time granularity:",
-                   choices = c("Quarter" = "quarter_label", "Year" = "year"),
-                   selected = "quarter_label"),
-      
-      selectInput("group_by", "Group by (optional):",
-                  choices = c("All" = "all", "Hospital" = "Name", "Race" = "race", "Measure" = "measure"),
-                  selected = "all"),
-      
-      checkboxInput("show_ci", "Show Confidence Intervals", value = FALSE)
+    measures <- unique(df$measure)
+    # The measure column is already cleaned by clean_measure_names()
+    display_names <- unique(df$measure) 
+    
+    # Create a named vector where the name is the display name and the value is the ID
+    names(display_names) <- display_names
+    
+    return(display_names)
+  })
+  
+  # Reactive list of unique years for UI dropdown
+  year_choices <- reactive({
+    df <- raw_data()
+    req(df, "year")
+    
+    years <- unique(df$year)
+    return(sort(as.character(years), decreasing = TRUE))
+  })
+  
+  
+  # --- UI Generation based on Data ---
+  
+  # Render the Year Select Input (dynamic based on uploaded data)
+  output$year_select_ui <- renderUI({
+    req(raw_data())
+    selectInput(
+      "year_select",
+      "Select Year:",
+      choices = year_choices(),
+      selected = max(year_choices())
     )
   })
   
-  # Reactive expression for the main filtered data
-  filtered_smm_data <- reactive({
-    req(input$year_range, input$granularity, input$group_by)
+  # Render the Measure Select Input for Numerator/Denominator tab
+  output$measure_select_nd_ui <- renderUI({
+    req(raw_data(), "measure_display_type")
     
-    data <- smm_data_reactive()
+    # Filter choices to only include measures of type 'numerator/denominator'
+    measures_nd_ids <- unique(raw_data() %>% 
+                                # Use the cleaned, lower-case value for filtering
+                                filter(measure_display_type == "numerator/denominator") %>% 
+                                pull(measure))
     
-    data_filtered <- data %>%
-      filter(year >= input$year_range[1] & year <= input$year_range[2]) %>%
-      filter(!measure %in% c("SMM Hemorrhage", "SMM Preeclampsia"))
+    # Filter the full choices list
+    unique_choices_nd <- measure_choices()[measure_choices() %in% measures_nd_ids]
     
-    grouping_vars <- if(input$group_by != "all") c(input$granularity, input$group_by) else input$granularity
+    if (length(unique_choices_nd) == 0) {
+      return(p("No Numerator/Denominator measures found in data."))
+    }
     
-    smm_summary <- data_filtered %>%
-      group_by(across(all_of(grouping_vars))) %>%
+    selectInput(
+      "measure_select_nd",
+      "Select Measure:",
+      choices = unique_choices_nd,
+      selected = unique_choices_nd[1]
+    )
+  })
+  
+  # --- Conditional Main Content Render ---
+  output$main_content <- renderUI({
+    # Display initial message if no file uploaded
+    if (is.null(input$file_upload)) {
+      return(
+        div(class = "mt-5 p-5 text-center bg-light border rounded",
+            h3("Welcome to the Process Measures Dashboard"),
+            p("Please upload a CSV or Excel file containing the process measures data using the control on the left to begin.")
+        )
+      )
+    }
+    
+    # Check if data exists and measures are available
+    if (is.null(input$measure_select_nd) || length(input$measure_select_nd) == 0) {
+      # Message shown if data is uploaded but no N/D measures are found
+      return(
+        div(class = "mt-5 p-5 text-center bg-warning border rounded",
+            h3("No Numerator/Denominator Measures Found"),
+            p("The uploaded data does not contain any measures marked with 'numerator/denominator' 
+              in the 'measure_display_type' column for the selected year and available data. 
+              Please ensure the column value is correct (e.g., 'numerator/denominator').")
+        )
+      )
+    } else {
+      # Content shown after successful upload and filter selection
+      tagList(
+        h3(textOutput("nd_title")),
+        # Line plot for time series trends by hospital
+        plotlyOutput("nd_time_series_plot", height = "400px"),
+        
+        # Conditional Bar chart displayed after a click event
+        h4(textOutput("nd_bar_chart_title")),
+        # Increased height for bar chart to accommodate vertical labels
+        plotlyOutput("nd_hospital_bar_chart", height = "400px") 
+      )
+    }
+  })
+  
+  
+  # --- Reactive Data Preparation for Numerator/Denominator ---
+  
+  # 1. Filter data based on measure type, selected year, and measure
+  nd_data_filtered <- reactive({
+    req(raw_data(), input$year_select, input$measure_select_nd)
+    
+    # Filter by measure type, year, and selected measure
+    raw_data() %>%
+      filter(
+        measure_display_type == "numerator/denominator",
+        year == input$year_select,
+        measure == input$measure_select_nd
+      )
+  })
+  
+  # 2. Aggregate data to Quarter and Hospital level
+  nd_data_aggregated <- reactive({
+    df_agg <- nd_data_filtered() %>%
+      # Group by the real Name AND the quarter
+      group_by(Name, quarter) %>%
       summarise(
         total_numerator = sum(numerator, na.rm = TRUE),
         total_denominator = sum(denominator, na.rm = TRUE),
+        rate = ifelse(total_denominator > 0, total_numerator / total_denominator, 0),
         .groups = 'drop'
+      ) %>%
+      # Ensure quarter is a factor for proper X-axis ordering
+      mutate(quarter_string = factor(paste0("Q", quarter), levels = paste0("Q", 1:4)))
+    
+    return(df_agg)
+  })
+  
+  # --- Output: Time Series Line Plot (Numerator/Denominator) ---
+  output$nd_title <- renderText({
+    measure_name <- input$measure_select_nd # Measure is already cleaned
+    paste0("Time Series Trend: ", measure_name, " (", input$year_select, ")")
+  })
+  
+  output$nd_time_series_plot <- renderPlotly({
+    data_plot <- nd_data_aggregated()
+    
+    if (nrow(data_plot) == 0) {
+      return(NULL)
+    }
+    
+    # Get the number of unique hospitals to select enough colors
+    n_hospitals <- length(unique(data_plot$Name))
+    # Use 'Paired' which supports up to 12 colors
+    color_palette <- brewer.pal(n = max(3, n_hospitals), name = "Paired")
+    
+    p <- data_plot %>%
+      # Use the 'Name' column for coloring and grouping
+      ggplot(aes(x = quarter_string, y = rate, group = Name, color = Name,
+                 # Custom text for hover and click events
+                 text = paste("Hospital:", Name, # Use real name here
+                              "<br>Quarter:", quarter_string,
+                              "<br>Rate:", scales::percent(rate, accuracy = 0.1),
+                              "<br>N (Denominator):", total_denominator))) +
+      geom_line(linewidth = 1) +
+      geom_point(size = 3) +
+      # FIXED: Set y-axis limits to 0-100% with 25% breaks
+      scale_y_continuous(labels = scales::percent, limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+      # Apply the new color scale
+      scale_color_manual(values = color_palette) +
+      labs(
+        x = "Quarter",
+        y = "Rate (%)",
+        color = "Hospital"
+      ) +
+      theme_minimal() +
+      theme(legend.position = "bottom")
+    
+    # Convert to plotly, specifying hover and click features
+    ggplotly(p, tooltip = "text", source = "nd_time_series_plot_source") %>%
+      config(displaylogo = FALSE, 
+             modeBarButtonsToRemove = list('sendDataToCloud', 'hoverClosestCartesian', 'hoverCompareCartesian'))
+  })
+  
+  # --- Output: Bar Chart (Hospital Comparison) via Click Event ---
+  
+  # Reactive value to store the quarter selected by the click
+  selected_quarter_num <- reactiveVal(NULL)
+  
+  # Observe click event on the time series plot
+  observeEvent(event_data("plotly_click", source = "nd_time_series_plot_source"), {
+    click_data <- event_data("plotly_click", source = "nd_time_series_plot_source")
+    
+    # Extract the clicked quarter label (e.g., "Q1")
+    if (!is.null(click_data) && "x" %in% names(click_data)) {
+      quarter_clicked_string <- as.character(click_data$x)
+      # Extract just the number (e.g., "Q1" -> 1) for filtering the aggregated data
+      quarter_clicked_num <- as.numeric(gsub("Q", "", quarter_clicked_string))
+      selected_quarter_num(quarter_clicked_num)
+    }
+  })
+  
+  # Generate Bar Chart Title
+  output$nd_bar_chart_title <- renderText({
+    if (is.null(selected_quarter_num())) {
+      return("Click a point on the line chart above to compare hospitals in a specific quarter.")
+    } else {
+      measure_name <- input$measure_select_nd
+      paste0("Hospital Comparison for ", measure_name, " in ", input$year_select, " Q", selected_quarter_num())
+    }
+  })
+  
+  # Generate Bar Chart
+  output$nd_hospital_bar_chart <- renderPlotly({
+    req(selected_quarter_num())
+    
+    # Filter the aggregated data for the selected quarter number
+    data_bar <- nd_data_aggregated() %>%
+      filter(quarter == selected_quarter_num())
+    
+    if (nrow(data_bar) == 0) {
+      return(NULL)
+    }
+    
+    # Get the number of unique hospitals to select enough colors
+    n_hospitals <- length(unique(data_bar$Name))
+    color_palette <- brewer.pal(n = max(3, n_hospitals), name = "Paired")
+    
+    # Create the bar chart
+    p_bar <- data_bar %>%
+      # Order hospitals by rate for better visual comparison
+      # Use the 'Name' column for all plotting aesthetics
+      ggplot(aes(x = reorder(Name, rate), y = rate, fill = Name,
+                 # Custom text for hover
+                 text = paste("Hospital:", Name, # Use real name here
+                              "<br>Rate:", scales::percent(rate, accuracy = 0.1),
+                              "<br>N (Denominator):", total_denominator))) +
+      geom_bar(stat = "identity") +
+      # FIXED: Set y-axis limits to 0-100% with 25% breaks
+      scale_y_continuous(labels = scales::percent, limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+      # Apply the new color scale
+      scale_fill_manual(values = color_palette) +
+      labs(
+        x = "Hospital",
+        y = "Rate (%)"
+      ) +
+      theme_minimal() +
+      theme(
+        # FIXED: Rotate X-axis text 90 degrees for long names and adjust justification
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        legend.position = "none" # Legend is redundant in bar chart
       )
     
-    # Calculate confidence intervals
-    smm_summary %>%
-      mutate(
-        rate = (total_numerator / total_denominator) * 10000,
-        rate_lower_ci = (rate - qnorm(0.975) * 10000 * sqrt(rate/10000 * (1 - rate/10000) / total_denominator)),
-        rate_upper_ci = (rate + qnorm(0.975) * 10000 * sqrt(rate/10000 * (1 - rate/10000) / total_denominator)),
-        rate_lower_ci = pmax(0, rate_lower_ci), # ensure lower bound is not negative
-        rate = round(rate),
-        rate_lower_ci = round(rate_lower_ci),
-        rate_upper_ci = round(rate_upper_ci)
-      )
+    # Convert to plotly
+    ggplotly(p_bar, tooltip = "text") %>%
+      layout(title = "", xaxis = list(title = "Hospital")) %>% # X-axis title updated
+      config(displaylogo = FALSE, 
+             modeBarButtonsToRemove = list('sendDataToCloud', 'hoverClosestCartesian', 'hoverCompareCartesian'))
   })
   
-  # Reactive value to store the clicked point
-  clicked_point <- reactiveVal(NULL)
-  
-  # Observe clicks on the main plot
-  observeEvent(event_data("plotly_click"), {
-    click_data <- event_data("plotly_click")
-    # Take only the first x-value to avoid repetition
-    clicked_point(click_data$x[1])
-  })
+}
+
+# Run the application 
+shinyApp(ui = ui, server = server)
