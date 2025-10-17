@@ -89,19 +89,20 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   
   # Hospital Name Mapping (hardcoded as this is a lookup table)
+  # NEW: Separating names into FullName, Name, and AbbName
   hospital_mapping <- tribble(
-    ~Name, ~masked_name,
-    "Adventist Health Castle", "Chi Nu Psi",
-    "Hilo Benioff Medical Center", "Delta Pi Omicron",
-    "Kaiser Permanente Moanalua Medical Center", "Omicron Alpha Alpha",
-    "Kapiolani Medical Center for Women and Children", "Beta Simga Epislon",
-    "Kauai Veterans Memorial Hospital", "Iota Beta Rho",
-    "Kona Community Hospital", "Gamma Xi Beta",
-    "Maui Memorial Medical Center", "Psi Gamma Eta",
-    "Molokai General Hospital", "Beta Alpha Epislon",
-    "North Hawaii Community Hospital", "Alpha Iota Theta",
-    "The Queen's Medical Center", "Simga Rho Theta",
-    "Wilcox Medical Center", "Zeta Omicron Kappa"
+    ~FullName, ~Name, ~AbbName, ~masked_name,
+    "Adventist Health Castle (AHC)", "Adventist Health Castle", "AHC", "Chi Nu Psi",
+    "Hilo Benioff Medical Center (HBMC)", "Hilo Benioff Medical Center", "HBMC", "Delta Pi Omicron",
+    "Kaiser Permanente Moanalua Medical Center (KPMMC)", "Kaiser Permanente Moanalua Medical Center", "KPMMC", "Omicron Alpha Alpha",
+    "Kapiolani Medical Center for Women and Children (KMCWC)", "Kapiolani Medical Center for Women and Children", "KMCWC", "Beta Simga Epislon",
+    "Kauai Veterans Memorial Hospital (KVMH)", "Kauai Veterans Memorial Hospital", "KVMH", "Iota Beta Rho",
+    "Kona Community Hospital (KCH)", "Kona Community Hospital", "KCH", "Gamma Xi Beta",
+    "Maui Memorial Medical Center (MMMC)", "Maui Memorial Medical Center", "MMMC", "Psi Gamma Eta",
+    "Molokai General Hospital (MGH)", "Molokai General Hospital", "MGH", "Beta Alpha Epislon",
+    "North Hawaii Community Hospital (NHCH)", "North Hawaii Community Hospital", "NHCH", "Alpha Iota Theta",
+    "The Queen's Medical Center (QMC)", "The Queen's Medical Center", "QMC", "Simga Rho Theta",
+    "Wilcox Medical Center (WMC)", "Wilcox Medical Center", "WMC", "Zeta Omicron Kappa"
   )
   
   # Reactive expression to read and preprocess the uploaded file (using input$file_upload)
@@ -162,7 +163,7 @@ server <- function(input, output, session) {
         numerator = as.numeric(numerator),
         denominator = as.numeric(denominator)
       ) %>%
-      # Join with the mapping table to get the real 'Name'
+      # Join with the mapping table to get the three name types
       left_join(hospital_mapping, by = "masked_name")
     
     smm_data
@@ -263,7 +264,7 @@ server <- function(input, output, session) {
         
         # Conditional Bar chart displayed after a click event
         h4(textOutput("nd_bar_chart_title")),
-        # Increased height for bar chart to accommodate vertical labels
+        # Height is maintained at 400px to accommodate the vertical labels
         plotlyOutput("nd_hospital_bar_chart", height = "400px") 
       )
     }
@@ -288,8 +289,8 @@ server <- function(input, output, session) {
   # 2. Aggregate data to Quarter and Hospital level
   nd_data_aggregated <- reactive({
     df_agg <- nd_data_filtered() %>%
-      # Group by the real Name AND the quarter
-      group_by(Name, quarter) %>%
+      # Group by all three name columns (FullName, Name, AbbName) and the quarter
+      group_by(FullName, Name, AbbName, quarter) %>%
       summarise(
         total_numerator = sum(numerator, na.rm = TRUE),
         total_denominator = sum(denominator, na.rm = TRUE),
@@ -316,21 +317,21 @@ server <- function(input, output, session) {
     }
     
     # Get the number of unique hospitals to select enough colors
-    n_hospitals <- length(unique(data_plot$Name))
+    n_hospitals <- length(unique(data_plot$FullName))
     # Use 'Paired' which supports up to 12 colors
     color_palette <- brewer.pal(n = max(3, n_hospitals), name = "Paired")
     
     p <- data_plot %>%
-      # Use the 'Name' column for coloring and grouping
-      ggplot(aes(x = quarter_string, y = rate, group = Name, color = Name,
-                 # Custom text for hover and click events
-                 text = paste("Hospital:", Name, # Use real name here
+      # Use FullName for color (legend) and grouping
+      ggplot(aes(x = quarter_string, y = rate, group = FullName, color = FullName,
+                 # Use FullName in hover text for the main graph
+                 text = paste("Hospital:", FullName, 
                               "<br>Quarter:", quarter_string,
                               "<br>Rate:", scales::percent(rate, accuracy = 0.1),
                               "<br>N (Denominator):", total_denominator))) +
       geom_line(linewidth = 1) +
       geom_point(size = 3) +
-      # FIXED: Set y-axis limits to 0-100% with 25% breaks
+      # Y-axis limits to 0-100% with 25% breaks
       scale_y_continuous(labels = scales::percent, limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
       # Apply the new color scale
       scale_color_manual(values = color_palette) +
@@ -389,37 +390,38 @@ server <- function(input, output, session) {
     }
     
     # Get the number of unique hospitals to select enough colors
-    n_hospitals <- length(unique(data_bar$Name))
+    n_hospitals <- length(unique(data_bar$AbbName))
     color_palette <- brewer.pal(n = max(3, n_hospitals), name = "Paired")
     
     # Create the bar chart
     p_bar <- data_bar %>%
-      # Order hospitals by rate for better visual comparison
-      # Use the 'Name' column for all plotting aesthetics
-      ggplot(aes(x = reorder(Name, rate), y = rate, fill = Name,
-                 # Custom text for hover
-                 text = paste("Hospital:", Name, # Use real name here
+      # X-Axis: Use AbbName (abbreviation) for axis label and sorting
+      # Fill/Color: Use FullName to keep colors consistent with the line chart
+      ggplot(aes(x = reorder(AbbName, rate), y = rate, fill = FullName,
+                 # Hover Text: Use Name (full name without abbreviation)
+                 text = paste("Hospital:", Name, 
                               "<br>Rate:", scales::percent(rate, accuracy = 0.1),
                               "<br>N (Denominator):", total_denominator))) +
       geom_bar(stat = "identity") +
-      # FIXED: Set y-axis limits to 0-100% with 25% breaks
+      # Y-axis limits to 0-100% with 25% breaks
       scale_y_continuous(labels = scales::percent, limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
       # Apply the new color scale
+      # NOTE: scale_fill_manual must use FullName as the mapping key now
       scale_fill_manual(values = color_palette) +
       labs(
-        x = "Hospital",
+        x = "Hospital Abbreviation",
         y = "Rate (%)"
       ) +
       theme_minimal() +
       theme(
-        # FIXED: Rotate X-axis text 90 degrees for long names and adjust justification
-        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        # The 90-degree rotation is kept here for safety in case ggplotly doesn't handle the short names well
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), 
         legend.position = "none" # Legend is redundant in bar chart
       )
     
     # Convert to plotly
     ggplotly(p_bar, tooltip = "text") %>%
-      layout(title = "", xaxis = list(title = "Hospital")) %>% # X-axis title updated
+      layout(title = "", xaxis = list(title = "Hospital (Abbreviation)")) %>%
       config(displaylogo = FALSE, 
              modeBarButtonsToRemove = list('sendDataToCloud', 'hoverClosestCartesian', 'hoverCompareCartesian'))
   })
