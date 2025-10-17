@@ -77,9 +77,27 @@ ui <- fluidPage(
              )
     ),
     
-    # Placeholder Tabs for future development
-    tabPanel("Raw Value", value = "raw_tab",
-             p("This panel will display data for Raw Value measures (where Denominator = 1).")),
+    # Raw Value Tab (UPDATED)
+    tabPanel("Raw Value", 
+             value = "raw_tab",
+             sidebarLayout(
+               sidebarPanel(
+                 width = 3,
+                 h4("Data & Filter Controls"),
+                 
+                 # Year Filter for Raw Value
+                 uiOutput("year_select_ui_raw"), 
+                 
+                 # Measure Selector for Raw Value measures
+                 uiOutput("measure_select_raw_ui")
+               ),
+               
+               mainPanel(
+                 width = 9,
+                 uiOutput("main_content_raw") 
+               )
+             )
+    ),
     
     # Range Tab 
     tabPanel("Range",
@@ -227,6 +245,30 @@ server <- function(input, output, session) {
     )
   })
   
+  # Render the Year Select Input (dynamic based on uploaded data) - Raw Tab (Adjusted)
+  output$year_select_ui_raw <- renderUI({
+    req(raw_data())
+    
+    # Filter years to only include those with raw value data and up to 2023
+    raw_data_years <- raw_data() %>%
+      filter(measure_display_type == "raw value", as.numeric(as.character(year)) <= 2023) %>%
+      pull(year) %>%
+      unique() %>%
+      as.character()
+    
+    sorted_years <- sort(raw_data_years, decreasing = TRUE)
+    
+    # Set default selected year to the max year found in the filtered list
+    selected_year <- if (length(sorted_years) > 0) max(sorted_years) else NULL
+    
+    selectInput(
+      "year_select_raw",
+      "Select Year:",
+      choices = sorted_years,
+      selected = selected_year
+    )
+  })
+  
   # Render the Year Select Input (dynamic based on uploaded data) - Range Tab
   output$year_select_ui_range <- renderUI({
     req(raw_data())
@@ -258,6 +300,29 @@ server <- function(input, output, session) {
       "Select Measure:",
       choices = unique_choices_nd,
       selected = unique_choices_nd[1]
+    )
+  })
+  
+  # Render the Measure Select Input for Raw Value tab (UPDATED)
+  output$measure_select_raw_ui <- renderUI({
+    req(raw_data(), "measure_display_type")
+    
+    # Filter choices to only include measures of type 'raw value'
+    measures_raw_ids <- unique(raw_data() %>% 
+                                 filter(measure_display_type == "raw value") %>% 
+                                 pull(measure))
+    
+    unique_choices_raw <- measure_choices()[measure_choices() %in% measures_raw_ids]
+    
+    if (length(unique_choices_raw) == 0) {
+      return(p("No Raw Value measures found in data for the selected year."))
+    }
+    
+    selectInput(
+      "measure_select_raw",
+      "Select Measure:",
+      choices = unique_choices_raw,
+      selected = unique_choices_raw[1]
     )
   })
   
@@ -314,6 +379,37 @@ server <- function(input, output, session) {
         plotlyOutput("nd_time_series_plot", height = "400px"),
         h4(textOutput("nd_bar_chart_title")),
         plotlyOutput("nd_hospital_bar_chart", height = "400px") 
+      )
+    }
+  })
+  
+  # Raw Value Tab Content (UPDATED)
+  output$main_content_raw <- renderUI({
+    if (is.null(input$file_upload)) {
+      return(
+        div(class = "mt-5 p-5 text-center bg-light border rounded",
+            h3("Welcome to the Process Measures Dashboard"),
+            p("Please upload a CSV or Excel file containing the process measures data using the control on the Numerator/Denominator tab to begin.")
+        )
+      )
+    }
+    
+    # Check if a measure is selected for Raw tab
+    if (is.null(input$measure_select_raw) || length(input$measure_select_raw) == 0) {
+      return(
+        div(class = "mt-5 p-5 text-center bg-warning border rounded",
+            h3("No Raw Value Measures Found"),
+            p("The uploaded data does not contain any measures marked with 'raw value' 
+              in the 'measure_display_type' column for the selected year and available data. 
+              Please ensure the column value is correct.")
+        )
+      )
+    } else {
+      tagList(
+        h3(textOutput("raw_title")),
+        plotlyOutput("raw_time_series_plot", height = "400px"),
+        h4(textOutput("raw_bar_chart_title")),
+        plotlyOutput("raw_hospital_bar_chart", height = "400px") 
       )
     }
   })
@@ -426,7 +522,6 @@ server <- function(input, output, session) {
     data_plot <- nd_data_aggregated()
     
     # Set levels explicitly based on the data present to avoid plotting empty factors
-    # This ensures the quarter_string is ordered correctly for the X-axis
     present_quarters <- unique(data_plot$quarter)
     data_plot$quarter_string <- factor(
       data_plot$quarter_string, 
@@ -438,6 +533,7 @@ server <- function(input, output, session) {
     
     p <- data_plot %>%
       ggplot(aes(x = quarter_string, y = rate, group = FullName, color = FullName,
+                 key = quarter, # <-- ADDED KEY FOR ROBUST CLICK HANDLING
                  text = paste("Hospital:", FullName, 
                               "<br>Quarter:", quarter_string,
                               "<br>Rate:", scales::percent(rate, accuracy = 0.1),
@@ -458,10 +554,10 @@ server <- function(input, output, session) {
   
   observeEvent(event_data("plotly_click", source = "nd_time_series_plot_source"), {
     click_data <- event_data("plotly_click", source = "nd_time_series_plot_source")
-    if (!is.null(click_data) && "x" %in% names(click_data)) {
-      # Extract the string "Q#" and then the number
-      quarter_clicked_string <- as.character(click_data$x)
-      quarter_clicked_num <- as.numeric(gsub("Q", "", quarter_clicked_string))
+    
+    if (!is.null(click_data) && "key" %in% names(click_data)) {
+      # Use the 'key' (quarter number) for robust selection
+      quarter_clicked_num <- as.numeric(click_data$key)
       selected_quarter_num_nd(quarter_clicked_num)
     }
   })
@@ -505,7 +601,155 @@ server <- function(input, output, session) {
   })
   
   # ----------------------------------------------------------------------------------
-  # --- Range Logic (Aggregation remains as mean(numerator)) -------------------------
+  # --- Raw Value Logic (FIXED) ------------------------------------------------------
+  # ----------------------------------------------------------------------------------
+  
+  # 1. Filter data based on measure type, selected year, and measure
+  raw_data_filtered <- reactive({
+    req(raw_data(), input$measure_select_raw)
+    
+    df <- raw_data()
+    
+    # Robustly determine the selected year
+    selected_year <- if (is.null(input$year_select_raw)) {
+      # Use the max year up to 2023 for raw data if input is null
+      max(as.character(df$year[df$measure_display_type == "raw value" & as.numeric(as.character(df$year)) <= 2023]), na.rm = TRUE)
+    } else {
+      input$year_select_raw
+    }
+    
+    # Filter by measure type, year, and selected measure
+    df_filtered <- df %>%
+      filter(
+        measure_display_type == "raw value",
+        year == selected_year,
+        measure == input$measure_select_raw
+      )
+    
+    validate(
+      need(nrow(df_filtered) > 0, 
+           paste0("No raw data points found for '", input$measure_select_raw, 
+                  "' in year ", selected_year, 
+                  ". Please verify the raw data for this measure/year combination."))
+    )
+    
+    return(df_filtered)
+  })
+  
+  # 2. Aggregate data to Quarter and Hospital level (Sum of raw counts)
+  raw_data_aggregated <- reactive({
+    req(nrow(raw_data_filtered()) > 0)
+    df_agg <- raw_data_filtered() %>%
+      group_by(FullName, Name, AbbName, quarter) %>%
+      summarise(
+        # Raw value logic: SUM the numerator (the raw count)
+        total_count = sum(numerator, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      mutate(quarter_string = factor(paste0("Q", quarter), levels = paste0("Q", 1:4)))
+    
+    df_agg <- df_agg %>% filter(!is.nan(total_count) & !is.infinite(total_count))
+    
+    validate(
+      need(nrow(df_agg) > 0, 
+           "Filtered data exists but failed to aggregate by quarter. Check if the 'numerator' column contains valid numbers for aggregation.")
+    )
+    
+    return(df_agg)
+  })
+  
+  # 3. Output: Time Series Line Plot (Raw Value)
+  output$raw_title <- renderText({
+    req(input$year_select_raw)
+    measure_name <- input$measure_select_raw
+    paste0("Time Series Trend: ", measure_name, " (", input$year_select_raw, ") - Raw Count")
+  })
+  
+  output$raw_time_series_plot <- renderPlotly({
+    req(nrow(raw_data_aggregated()) > 0)
+    data_plot <- raw_data_aggregated()
+    
+    # Set levels explicitly based on the data present to avoid plotting empty factors
+    present_quarters <- unique(data_plot$quarter)
+    data_plot$quarter_string <- factor(
+      data_plot$quarter_string, 
+      levels = paste0("Q", sort(as.numeric(present_quarters)))
+    )
+    
+    n_hospitals <- length(unique(data_plot$FullName))
+    color_palette <- brewer.pal(n = max(3, n_hospitals), name = "Paired")
+    
+    p <- data_plot %>%
+      ggplot(aes(x = quarter_string, y = total_count, group = FullName, color = FullName,
+                 key = quarter, # <-- FIX: Use quarter as key
+                 text = paste("Hospital:", FullName, 
+                              "<br>Quarter:", quarter_string,
+                              "<br>Total Count:", total_count))) +
+      geom_line(linewidth = 1) +
+      geom_point(size = 3) +
+      # Fixed Y-axis limit of 5, with integer breaks
+      scale_y_continuous(limits = c(0, 5), breaks = 0:5) +
+      scale_color_manual(values = color_palette) +
+      labs(x = "Quarter", y = "Total Count", color = "Hospital") + 
+      theme_minimal() + theme(legend.position = "bottom")
+    
+    ggplotly(p, tooltip = "text", source = "raw_time_series_plot_source") %>%
+      config(displaylogo = FALSE, modeBarButtonsToRemove = list('sendDataToCloud', 'hoverClosestCartesian', 'hoverCompareCartesian'))
+  })
+  
+  # 4. Bar Chart Trigger and Logic (Raw Value)
+  selected_quarter_num_raw <- reactiveVal(NULL) 
+  
+  observeEvent(event_data("plotly_click", source = "raw_time_series_plot_source"), {
+    click_data <- event_data("plotly_click", source = "raw_time_series_plot_source")
+    
+    if (!is.null(click_data) && "key" %in% names(click_data)) {
+      # FIX: Use the 'key' (quarter number) for robust selection
+      quarter_clicked_num <- as.numeric(click_data$key)
+      selected_quarter_num_raw(quarter_clicked_num)
+    }
+  })
+  
+  output$raw_bar_chart_title <- renderText({
+    if (is.null(selected_quarter_num_raw())) {
+      return("Click a point on the line chart above to compare hospitals in a specific quarter.")
+    } else {
+      measure_name <- input$measure_select_raw
+      paste0("Hospital Comparison for ", measure_name, " in ", input$year_select_raw, " Q", selected_quarter_num_raw())
+    }
+  })
+  
+  output$raw_hospital_bar_chart <- renderPlotly({
+    req(selected_quarter_num_raw(), nrow(raw_data_aggregated()) > 0)
+    
+    data_bar <- raw_data_aggregated() %>%
+      filter(quarter == selected_quarter_num_raw())
+    
+    if (nrow(data_bar) == 0) { return(NULL) }
+    
+    n_hospitals <- length(unique(data_bar$AbbName))
+    color_palette <- brewer.pal(n = max(3, n_hospitals), name = "Paired")
+    
+    p_bar <- data_bar %>%
+      ggplot(aes(x = reorder(AbbName, total_count), y = total_count, fill = FullName,
+                 text = paste("Hospital:", Name, 
+                              "<br>Total Count:", total_count))) + 
+      geom_bar(stat = "identity") +
+      # Fixed Y-axis limit of 5, with integer breaks
+      scale_y_continuous(limits = c(0, 5), breaks = 0:5) +
+      scale_fill_manual(values = color_palette) +
+      labs(x = "Hospital Abbreviation", y = "Total Count") + 
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), 
+            legend.position = "none")
+    
+    ggplotly(p_bar, tooltip = "text") %>%
+      layout(title = "", xaxis = list(title = "Hospital (Abbreviation)")) %>%
+      config(displaylogo = FALSE, modeBarButtonsToRemove = list('sendDataToCloud', 'hoverClosestCartesian', 'hoverCompareCartesian'))
+  })
+  
+  # ----------------------------------------------------------------------------------
+  # --- Range Logic ------------------------------------------------------------------
   # ----------------------------------------------------------------------------------
   
   # 1. Filter data based on measure type, selected year, and measure
@@ -546,9 +790,7 @@ server <- function(input, output, session) {
     df_agg <- range_data_filtered() %>%
       group_by(FullName, Name, AbbName, quarter) %>%
       summarise(
-        # Range logic: Calculate the rate as the mean of the numerator (the compliance score/proportion)
-        # This assumes the 'numerator' column already holds the compliance score (e.g., 0-100)
-        # and we need to average it, then convert to 0-1 proportion.
+        # Range logic: Calculate the rate as the mean of the numerator 
         rate = mean(numerator, na.rm = TRUE) / 100, 
         
         # For display, we can show the count of records that contributed to the average
@@ -592,6 +834,7 @@ server <- function(input, output, session) {
     
     p <- data_plot %>%
       ggplot(aes(x = quarter_string, y = rate, group = FullName, color = FullName,
+                 key = quarter, # <-- ADDED KEY FOR ROBUST CLICK HANDLING
                  text = paste("Hospital:", FullName, 
                               "<br>Quarter:", quarter_string,
                               "<br>Avg. Rate:", scales::percent(rate, accuracy = 0.1),
@@ -612,19 +855,11 @@ server <- function(input, output, session) {
   
   observeEvent(event_data("plotly_click", source = "range_time_series_plot_source"), {
     click_data <- event_data("plotly_click", source = "range_time_series_plot_source")
-    if (!is.null(click_data) && "x" %in% names(click_data)) {
-      # --- FIX: Extract the numeric quarter directly from the "Q#" string ---
-      quarter_clicked_string <- as.character(click_data$x)
-      # Extract the number after 'Q'
-      quarter_clicked_num <- as.numeric(gsub("^Q", "", quarter_clicked_string))
-      
-      # Validate the number is 1-4
-      if (quarter_clicked_num %in% 1:4) {
-        selected_quarter_num_range(quarter_clicked_num)
-      } else {
-        # Handle case where click data might be malformed or non-quarter specific
-        warning("Clicked quarter could not be parsed correctly:", quarter_clicked_string)
-      }
+    
+    if (!is.null(click_data) && "key" %in% names(click_data)) {
+      # Use the 'key' (quarter number) for robust selection
+      quarter_clicked_num <- as.numeric(click_data$key)
+      selected_quarter_num_range(quarter_clicked_num)
     }
   })
   
