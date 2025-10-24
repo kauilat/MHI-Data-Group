@@ -41,11 +41,31 @@ clean_race_names <- function(race_name) {
 
 # --- UI DEFINITION ---
 ui <- fluidPage(
-  titlePanel("Process Measures Dashboard - Data Upload"),
+  titlePanel("Process Measures Dashboard"), # Removed Data Upload from title since it's now in the first tab
   
   # Main layout with tabs for measure types
   tabsetPanel(
     id = "measure_type_tabs",
+    
+    # NEW: Measure Index Tab (Table of Contents)
+    tabPanel("Measure Index",
+             value = "toc_tab",
+             fluidRow(
+               # 1. File Upload Control - MOVED HERE
+               column(12, 
+                      div(style = "padding: 15px; border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9; margin-bottom: 20px;",
+                          h4("1. Upload Data File"),
+                          fileInput("file_upload", "Upload Data (CSV or Excel)",
+                                    multiple = FALSE,
+                                    accept = c(".csv", ".xls", ".xlsx"))
+                      )
+               ),
+               # 2. Measure Index Content
+               column(12, 
+                      uiOutput("toc_page_content")
+               )
+             )
+    ),
     
     # Numerator/Denominator Tab - Current Focus
     tabPanel("Numerator/Denominator",
@@ -53,14 +73,7 @@ ui <- fluidPage(
              sidebarLayout(
                sidebarPanel(
                  width = 3,
-                 h4("Data & Filter Controls"),
-                 
-                 # 1. File Input Control for Uploading Data (Renamed to input$file_upload)
-                 fileInput("file_upload", "Upload Data (CSV or Excel)",
-                           multiple = FALSE,
-                           accept = c(".csv", ".xls", ".xlsx")),
-                 
-                 hr(),
+                 h4("Filter Controls: Num/Den"),
                  
                  # 2. Year Filter (will be dynamically updated)
                  uiOutput("year_select_ui_nd"), 
@@ -77,13 +90,13 @@ ui <- fluidPage(
              )
     ),
     
-    # Raw Value Tab (UPDATED)
+    # Raw Value Tab
     tabPanel("Raw Value", 
              value = "raw_tab",
              sidebarLayout(
                sidebarPanel(
                  width = 3,
-                 h4("Data & Filter Controls"),
+                 h4("Filter Controls: Raw Value"),
                  
                  # Year Filter for Raw Value
                  uiOutput("year_select_ui_raw"), 
@@ -105,7 +118,7 @@ ui <- fluidPage(
              sidebarLayout(
                sidebarPanel(
                  width = 3,
-                 h4("Data & Filter Controls"),
+                 h4("Filter Controls: Range"),
                  
                  # The file input is shared, but we need the Year filter here too
                  uiOutput("year_select_ui_range"), 
@@ -231,11 +244,91 @@ server <- function(input, output, session) {
     return(sort(as.character(years), decreasing = TRUE))
   })
   
+  # --- TABLE OF CONTENTS LOGIC ---
   
-  # --- UI Generation based on Data ---
+  # Reactive list of measures organized and padded for the TOC table
+  measure_list_by_type <- reactive({
+    df <- raw_data()
+    req(df) # Require data upload
+    
+    # 1. Get unique, cleaned measures and their types
+    measures_unique <- df %>%
+      select(measure, measure_display_type) %>%
+      distinct() %>%
+      # Clean up the display type column for consistent grouping
+      mutate(
+        clean_type = case_when(
+          tolower(measure_display_type) == "numerator/denominator" ~ "Numerator/Denominator",
+          tolower(measure_display_type) == "raw value" ~ "Raw Value",
+          tolower(measure_display_type) == "range" ~ "Range",
+          .default = "Other"
+        )
+      ) %>%
+      filter(clean_type %in% c("Numerator/Denominator", "Raw Value", "Range"))
+    
+    # 2. Group, sort, and extract the lists
+    list_nd <- measures_unique %>% filter(clean_type == "Numerator/Denominator") %>% pull(measure) %>% unique() %>% sort()
+    list_raw <- measures_unique %>% filter(clean_type == "Raw Value") %>% pull(measure) %>% unique() %>% sort()
+    list_range <- measures_unique %>% filter(clean_type == "Range") %>% pull(measure) %>% unique() %>% sort()
+    
+    # 3. Pad the lists to the maximum length
+    max_len <- max(length(list_nd), length(list_raw), length(list_range))
+    
+    # Padding function
+    pad_list <- function(l, max_len) {
+      length(l) <- max_len
+      return(l)
+    }
+    
+    # Create the final data frame
+    toc_df <- data.frame(
+      `Numerator/Denominator` = pad_list(list_nd, max_len),
+      `Raw Value` = pad_list(list_raw, max_len),
+      `Range` = pad_list(list_range, max_len),
+      check.names = FALSE # Keep column names as they are
+    )
+    
+    return(toc_df)
+  })
+  
+  # Render the TOC page content
+  output$toc_page_content <- renderUI({
+    if (is.null(input$file_upload)) {
+      return(
+        div(class = "mt-5 p-5 text-center",
+            h3("Welcome to the Process Measures Dashboard"),
+            p("Please upload a CSV or Excel file using the control above to view the measure index and begin analysis.")
+        )
+      )
+    }
+    
+    # Once data is uploaded, show the TOC
+    tagList(
+      h2("Measure Index: Table of Contents"),
+      p("Below are all the unique measures found in the uploaded file, categorized by their display type. Select a tab above to explore the data for that measure type."),
+      hr(),
+      tableOutput("measure_toc_table")
+    )
+  })
+  
+  # Render the actual TOC table
+  output$measure_toc_table <- renderTable({
+    req(raw_data())
+    toc_df <- measure_list_by_type()
+    
+    # Convert NA to empty string for cleaner display
+    toc_df[is.na(toc_df)] <- ""
+    
+    return(toc_df)
+  }, striped = TRUE, bordered = TRUE, hover = TRUE, align = 'l')
+  
+  
+  # --- UI Generation based on Data (Remaining Tabs) ---
   
   # Render the Year Select Input (dynamic based on uploaded data) - ND Tab
   output$year_select_ui_nd <- renderUI({
+    # Only render if data is uploaded
+    if (is.null(input$file_upload)) { return(p("Please upload data on the Measure Index tab.")) }
     req(raw_data())
     selectInput(
       "year_select_nd",
@@ -247,6 +340,8 @@ server <- function(input, output, session) {
   
   # Render the Year Select Input (dynamic based on uploaded data) - Raw Tab (Adjusted)
   output$year_select_ui_raw <- renderUI({
+    # Only render if data is uploaded
+    if (is.null(input$file_upload)) { return(p("Please upload data on the Measure Index tab.")) }
     req(raw_data())
     
     # Filter years to only include those with raw value data and up to 2023
@@ -271,6 +366,8 @@ server <- function(input, output, session) {
   
   # Render the Year Select Input (dynamic based on uploaded data) - Range Tab
   output$year_select_ui_range <- renderUI({
+    # Only render if data is uploaded
+    if (is.null(input$file_upload)) { return(p("Please upload data on the Measure Index tab.")) }
     req(raw_data())
     selectInput(
       "year_select_range",
@@ -282,6 +379,7 @@ server <- function(input, output, session) {
   
   # Render the Measure Select Input for Numerator/Denominator tab
   output$measure_select_nd_ui <- renderUI({
+    if (is.null(input$file_upload)) { return(p("Please upload data on the Measure Index tab.")) }
     req(raw_data(), "measure_display_type")
     
     # Filter choices to only include measures of type 'numerator/denominator'
@@ -305,6 +403,7 @@ server <- function(input, output, session) {
   
   # Render the Measure Select Input for Raw Value tab (UPDATED)
   output$measure_select_raw_ui <- renderUI({
+    if (is.null(input$file_upload)) { return(p("Please upload data on the Measure Index tab.")) }
     req(raw_data(), "measure_display_type")
     
     # Filter choices to only include measures of type 'raw value'
@@ -328,6 +427,7 @@ server <- function(input, output, session) {
   
   # Render the Measure Select Input for Range tab 
   output$measure_select_range_ui <- renderUI({
+    if (is.null(input$file_upload)) { return(p("Please upload data on the Measure Index tab.")) }
     req(raw_data(), "measure_display_type")
     
     # Filter choices to only include measures of type 'range'
@@ -357,8 +457,8 @@ server <- function(input, output, session) {
     if (is.null(input$file_upload)) {
       return(
         div(class = "mt-5 p-5 text-center bg-light border rounded",
-            h3("Welcome to the Process Measures Dashboard"),
-            p("Please upload a CSV or Excel file containing the process measures data using the control on the left to begin.")
+            h3("Data Required"),
+            p("Please upload a CSV or Excel file using the control on the Measure Index tab to begin.")
         )
       )
     }
@@ -367,7 +467,7 @@ server <- function(input, output, session) {
     if (is.null(input$measure_select_nd) || length(input$measure_select_nd) == 0) {
       return(
         div(class = "mt-5 p-5 text-center bg-warning border rounded",
-            h3("No Numerator/Denominator Measures Found"),
+            h3("No Numerator/Denominator Measures Available"),
             p("The uploaded data does not contain any measures marked with 'numerator/denominator' 
               in the 'measure_display_type' column for the selected year and available data. 
               Please ensure the column value is correct.")
@@ -383,13 +483,13 @@ server <- function(input, output, session) {
     }
   })
   
-  # Raw Value Tab Content (UPDATED)
+  # Raw Value Tab Content
   output$main_content_raw <- renderUI({
     if (is.null(input$file_upload)) {
       return(
         div(class = "mt-5 p-5 text-center bg-light border rounded",
-            h3("Welcome to the Process Measures Dashboard"),
-            p("Please upload a CSV or Excel file containing the process measures data using the control on the Numerator/Denominator tab to begin.")
+            h3("Data Required"),
+            p("Please upload a CSV or Excel file using the control on the Measure Index tab to begin.")
         )
       )
     }
@@ -398,7 +498,7 @@ server <- function(input, output, session) {
     if (is.null(input$measure_select_raw) || length(input$measure_select_raw) == 0) {
       return(
         div(class = "mt-5 p-5 text-center bg-warning border rounded",
-            h3("No Raw Value Measures Found"),
+            h3("No Raw Value Measures Available"),
             p("The uploaded data does not contain any measures marked with 'raw value' 
               in the 'measure_display_type' column for the selected year and available data. 
               Please ensure the column value is correct.")
@@ -419,8 +519,8 @@ server <- function(input, output, session) {
     if (is.null(input$file_upload)) {
       return(
         div(class = "mt-5 p-5 text-center bg-light border rounded",
-            h3("Welcome to the Process Measures Dashboard"),
-            p("Please upload a CSV or Excel file containing the process measures data using the control on the Numerator/Denominator tab to begin.")
+            h3("Data Required"),
+            p("Please upload a CSV or Excel file using the control on the Measure Index tab to begin.")
         )
       )
     }
@@ -429,7 +529,7 @@ server <- function(input, output, session) {
     if (is.null(input$measure_select_range) || length(input$measure_select_range) == 0) {
       return(
         div(class = "mt-5 p-5 text-center bg-warning border rounded",
-            h3("No Range Measures Found"),
+            h3("No Range Measures Available"),
             p("The uploaded data does not contain any measures marked with 'range' 
               in the 'measure_display_type' column for the selected year and available data. 
               Please ensure the column value is correct.")
@@ -601,7 +701,7 @@ server <- function(input, output, session) {
   })
   
   # ----------------------------------------------------------------------------------
-  # --- Raw Value Logic (FIXED) ------------------------------------------------------
+  # --- Raw Value Logic --------------------------------------------------------------
   # ----------------------------------------------------------------------------------
   
   # 1. Filter data based on measure type, selected year, and measure
